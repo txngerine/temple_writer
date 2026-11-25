@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import { Router } from 'express';
 import mongoose from 'mongoose';
 import ActivityLog from '../../models/ActivityLog.js';
+import DayClose from '../../models/DayClose.js';
 import Device from '../../models/Device.js';
 import Offering from '../../models/Offering.js';
 import Receipt from '../../models/Receipt.js';
@@ -91,6 +92,40 @@ const templeView = async (t) => {
   ]);
   return { ...t.toPublic(), counters, users };
 };
+
+// Platform overview: one row per temple for the day, so the super admin sees
+// money and counter health without opening each temple in turn.
+router.get('/temples/overview', requireSuperadmin, wrap(async (req, res) => {
+  const { day: q } = req.query;
+  if (q !== undefined && q !== '' && !isDay(q)) throw new HttpError(400, 'day must be YYYY-MM-DD');
+  const temples = await Temple.find().sort({ name: 1 });
+  const rows = await Promise.all(temples.map(async (t) => {
+    const day = q || templeDay(new Date(), t.timezone);
+    const [sums, voided, devices, closes] = await Promise.all([
+      Receipt.aggregate([
+        { $match: { templeId: t._id, day, voided: { $ne: true } } },
+        { $group: { _id: '$paymentMode', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+      ]),
+      Receipt.countDocuments({ templeId: t._id, day, voided: true }),
+      Device.find({ templeId: t._id, revokedAt: null, enrolledAt: { $ne: null } }).lean(),
+      DayClose.find({ templeId: t._id, day }).lean(),
+    ]);
+    const mode = (m) => sums.filter((r) => (r._id || 'cash') === m).reduce((n, r) => n + r.amount, 0);
+    const counters = devices.length;
+    return {
+      id: t.id, name: t.name, code: t.code, active: t.active, day,
+      collected: sums.reduce((n, r) => n + r.amount, 0),
+      receipts: sums.reduce((n, r) => n + r.count, 0),
+      cash: mode('cash'), digital: mode('upi') + mode('card'),
+      voided,
+      counters, online: devices.filter(isOnline).length,
+      unsynced: devices.reduce((n, d) => n + (d.pendingCount || 0), 0),
+      closed: closes.length,
+      short: closes.filter((c) => c.variance !== 0).length,
+    };
+  }));
+  res.json({ temples: rows, total: { collected: rows.reduce((n, r) => n + r.collected, 0), receipts: rows.reduce((n, r) => n + r.receipts, 0) } });
+}));
 
 router.get('/temples', requireSuperadmin, wrap(async (_req, res) => {
   const temples = await Temple.find().sort({ name: 1 });
@@ -408,6 +443,84 @@ router.get('/reports/daily', wrap(async (req, res) => {
     byOffering: byOffering.map((r) => ({ offering: r._id, count: r.count, amount: r.amount })),
     byCounter: byCounter.map((r) => ({ deviceId: r._id.deviceId, counterName: r._id.counterName, count: r.count, amount: r.amount })),
   });
+}));
+
+// ---- day close (till reconciliation) ----------------------------------------
+// Expected cash per counter = non-voided CASH receipts for the day. The office
+// counts the till and enters the figure; the variance is stored with the close.
+
+async function reconciliationFor(temple, day) {
+  const templeId = temple._id;
+  const [rows, closes, devices] = await Promise.all([
+    Receipt.aggregate([
+      { $match: { templeId, day, voided: { $ne: true } } },
+      { $group: { _id: { deviceId: '$deviceId', mode: '$paymentMode' }, count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+    ]),
+    DayClose.find({ templeId, day }).lean(),
+    Device.find({ templeId }).lean(),
+  ]);
+  const byId = new Map(devices.map((d) => [d.deviceId, d]));
+  const closeBy = new Map(closes.map((c) => [c.deviceId, c]));
+  const counters = new Map();
+  const blank = (deviceId) => ({ deviceId, cash: 0, upi: 0, card: 0, count: 0 });
+  for (const r of rows) {
+    if (!counters.has(r._id.deviceId)) counters.set(r._id.deviceId, blank(r._id.deviceId));
+    const c = counters.get(r._id.deviceId);
+    c[r._id.mode || 'cash'] += r.amount;
+    c.count += r.count;
+  }
+  for (const id of closeBy.keys()) if (!counters.has(id)) counters.set(id, blank(id));
+  return [...counters.values()].map((c) => {
+    const d = byId.get(c.deviceId);
+    const close = closeBy.get(c.deviceId);
+    return {
+      ...c,
+      counterName: d?.counterName || close?.counterName || c.deviceId,
+      pendingCount: d?.pendingCount || 0,
+      online: d ? isOnline(d) : false,
+      close: close ? {
+        declaredCash: close.declaredCash, expectedCash: close.expectedCash, variance: close.variance,
+        note: close.note, closedAt: close.closedAt, closedByEmail: close.closedByEmail,
+        stale: close.expectedCash !== c.cash,
+      } : null,
+    };
+  }).sort((a, b) => a.counterName.localeCompare(b.counterName));
+}
+
+router.get('/reports/reconciliation', wrap(async (req, res) => {
+  const day = dayParam(req);
+  res.json({ day, counters: await reconciliationFor(req.temple, day) });
+}));
+
+router.post('/reports/close', office, wrap(async (req, res) => {
+  const day = dayParam(req);
+  const deviceId = String(req.body?.deviceId || '');
+  const declaredCash = Number(req.body?.declaredCash);
+  if (!deviceId) throw new HttpError(400, 'deviceId required');
+  if (req.body?.declaredCash === '' || req.body?.declaredCash == null || !Number.isFinite(declaredCash) || declaredCash < 0) {
+    throw new HttpError(400, 'declaredCash must be a number, 0 or more');
+  }
+  const counter = (await reconciliationFor(req.temple, day)).find((c) => c.deviceId === deviceId);
+  if (!counter) throw new HttpError(404, 'No such counter for that day');
+  const expectedCash = counter.cash;
+  const variance = Math.round((declaredCash - expectedCash) * 100) / 100;
+  const note = String(req.body?.note || '').trim().slice(0, 500);
+  if (variance !== 0 && !note) throw new HttpError(400, 'A note is required when the cash does not match');
+  const close = await DayClose.findOneAndUpdate(
+    { templeId: req.temple._id, day, deviceId },
+    { templeId: req.temple._id, day, deviceId, counterName: counter.counterName, declaredCash, expectedCash, variance, note,
+      closedAt: new Date(), closedBy: req.user._id, closedByEmail: req.user.email },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  await logActivity({
+    templeId: req.temple._id, type: 'day.closed', severity: variance === 0 ? 'info' : 'warning',
+    actorType: 'user', userId: req.user._id, deviceId, counterName: counter.counterName,
+    objectType: 'dayclose', objectId: close.id,
+    message: `${req.user.email} closed ${counter.counterName}: expected ₹${expectedCash}, counted ₹${declaredCash}`
+      + (variance === 0 ? '' : ` (${variance > 0 ? 'over' : 'short'} ₹${Math.abs(variance)})`),
+    meta: { day, expectedCash, declaredCash, variance, note },
+  });
+  res.json({ close: { declaredCash, expectedCash, variance, note } });
 }));
 
 // ---- devices ---------------------------------------------------------------

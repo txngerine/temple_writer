@@ -141,7 +141,7 @@ export default function App() {
         <Routes key={temple?.id ?? 'none'}>
           {isSuper && <Route path="/temples" element={<Temples currentId={temple?.id} onOpen={(t) => openTemple(t)} />} />}
           {temple && <Route path="/" element={<DailyLog />} />}
-          {temple && <Route path="/reports" element={<Reports />} />}
+          {temple && <Route path="/reports" element={<Reports user={actor} />} />}
           {temple && <Route path="/receipts" element={<Receipts user={actor} />} />}
           {temple && <Route path="/offerings" element={<Offerings user={actor} />} />}
           {temple && <Route path="/devices" element={<Devices user={actor} />} />}

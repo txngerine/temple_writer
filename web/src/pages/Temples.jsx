@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Status, useLoad } from '../App.jsx';
-import { api } from '../api/client.js';
+import { api, rupees } from '../api/client.js';
 
 const BLANK = { name: '', code: '', timezone: 'Asia/Kolkata', adminEmail: '', adminName: '', adminPassword: '' };
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
@@ -8,6 +8,7 @@ const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$
 /** Platform super admin: every temple, and the way into each one. */
 export default function Temples({ currentId, onOpen }) {
   const { data, error, loading, reload } = useLoad(() => api('/temples'), []);
+  const overview = useLoad(() => api('/temples/overview'), []);
   const [form, setForm] = useState(null);
   const [actionError, setActionError] = useState(null);
   const [created, setCreated] = useState(null);
@@ -65,6 +66,29 @@ export default function Temples({ currentId, onOpen }) {
           <label>Admin password<input type="password" minLength={8} value={form.adminPassword} onChange={set('adminPassword')} required /></label>
           <button className="primary">Create temple</button>
         </form>
+      )}
+      {overview.data && (
+        <section className="card">
+          <h2>Today across all temples — {rupees(overview.data.total.collected)} from {overview.data.total.receipts} receipts</h2>
+          <table>
+            <thead><tr><th>Temple</th><th className="num">Collected</th><th className="num">Receipts</th><th className="num">Cash</th><th className="num">UPI / card</th><th>Counters online</th><th className="num">Unsynced</th><th>Cash closed</th><th></th></tr></thead>
+            <tbody>
+              {overview.data.temples.map((t) => (
+                <tr key={t.id} className={t.active ? '' : 'voided'}>
+                  <td>{t.name}</td>
+                  <td className="num">{rupees(t.collected)}</td>
+                  <td className="num">{t.receipts}</td>
+                  <td className="num">{rupees(t.cash)}</td>
+                  <td className="num">{rupees(t.digital)}</td>
+                  <td>{t.online} of {t.counters}</td>
+                  <td className="num">{t.unsynced}</td>
+                  <td>{t.closed} of {t.counters}{t.short ? ` (${t.short} mismatch)` : ''}</td>
+                  <td className="num"><button className="small" onClick={() => onOpen(t)}>Open</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
       )}
       <Status loading={loading} error={error} empty={data?.temples.length === 0 && 'No temples yet. Add the first one.'}>
         <section className="card">

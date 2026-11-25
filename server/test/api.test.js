@@ -346,3 +346,45 @@ test('deactivating a temple locks out its staff and counters until it is switche
   assert.equal((await api.get('/admin/offerings').set(bearer(boss))).status, 200);
   assert.equal((await api.post('/device/v1/heartbeat').set({ Authorization: `Device ${token}` }).send({})).status, 200);
 });
+
+test('day close: expected cash per counter, mismatch needs a note, re-closing updates, other temples never see it', async () => {
+  const today = templeDay();
+  const made = await api.post('/admin/devices').set(bearer(admin)).send({ counterName: 'Till 9' });
+  const enrolled = await api.post('/device/v1/enroll').send({ code: made.body.enrollCode });
+  const dev = () => ({ Authorization: `Device ${enrolled.body.token}` });
+  const upi = receipt({ amount: 40, paymentMode: 'upi' });
+  await api.post('/device/v1/receipts').set(dev()).send({ entries: [upi, receipt({ amount: 25 })] });
+
+  const rec = await api.get(`/admin/reports/reconciliation?day=${today}`).set(bearer(admin));
+  assert.equal(rec.status, 200);
+  const c = rec.body.counters.find((x) => x.counterName === 'Till 9');
+  assert.deepEqual([c.cash, c.upi, c.close], [25, 40, null]);
+
+  const close = (body, token = admin) => api.post(`/admin/reports/close?day=${today}`).set(bearer(token)).send({ deviceId: c.deviceId, ...body });
+  assert.equal((await close({ declaredCash: 25 }, viewer)).status, 403);
+  assert.equal((await close({ declaredCash: '' })).status, 400);
+  assert.equal((await close({ declaredCash: 20 })).status, 400);               // short, no note
+  assert.equal((await close({ declaredCash: 20, note: 'Change given' })).status, 200);
+  const after1 = (await api.get(`/admin/reports/reconciliation?day=${today}`).set(bearer(admin))).body.counters.find((x) => x.deviceId === c.deviceId);
+  assert.equal(after1.close.variance, -5);
+  assert.equal((await close({ declaredCash: 25 })).status, 200);
+  const after2 = (await api.get(`/admin/reports/reconciliation?day=${today}`).set(bearer(admin))).body.counters.find((x) => x.deviceId === c.deviceId);
+  assert.equal(after2.close.variance, 0);
+  assert.equal((await logsOf('day.closed')).length, 2);
+
+  // A late cash receipt makes the close stale.
+  await api.post('/device/v1/receipts').set(dev()).send({ entries: [receipt({ amount: 10 })] });
+  const stale = (await api.get(`/admin/reports/reconciliation?day=${today}`).set(bearer(admin))).body.counters.find((x) => x.deviceId === c.deviceId);
+  assert.equal(stale.close.stale, true);
+
+  // Super admin overview and temple isolation.
+  const other = await Temple.create({ name: 'Other', code: 'other' });
+  const otherAdmin = await signIn('admin@other.test', 'admin', other._id);
+  assert.deepEqual((await api.get(`/admin/reports/reconciliation?day=${today}`).set(bearer(otherAdmin))).body.counters, []);
+  assert.equal((await api.get('/admin/temples/overview').set(bearer(admin))).status, 403);
+  const ov = await api.get('/admin/temples/overview').set(bearer(superadmin));
+  assert.equal(ov.status, 200);
+  const mine = ov.body.temples.find((t) => t.code === 'test');
+  assert.deepEqual([mine.collected, mine.digital, mine.closed], [mine.cash + 40, 40, 1]);
+  assert.equal(ov.body.temples.find((t) => t.code === 'other').collected, 0);
+});

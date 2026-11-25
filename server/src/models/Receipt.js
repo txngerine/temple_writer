@@ -14,6 +14,7 @@ const ReceiptSchema = new mongoose.Schema({
   occurredAt: { type: Date, required: true },             // device time
   day:        { type: String, required: true },           // temple-local day of occurredAt
   receivedAt: { type: Date, required: true },
+  paymentMode: { type: String, enum: ['cash', 'upi', 'card'], default: 'cash' },
   printed:    { type: Boolean, default: false },
   voided:     { type: Boolean, default: false },
   voidedAt:   { type: Date },

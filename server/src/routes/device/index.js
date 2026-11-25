@@ -104,11 +104,12 @@ function toReceipt(entry, device, receivedAt, zone) {
   if (!Number.isFinite(amount) || amount < 0) return { error: 'amount must be a number, 0 or more' };
   const occurredAt = parseDate(entry.timestamp);
   if (!occurredAt) return { error: 'timestamp must be an ISO-8601 date' };
+  const paymentMode = ['cash', 'upi', 'card'].includes(entry.paymentMode) ? entry.paymentMode : 'cash';
   return {
     doc: {
       _id: entry.id.toLowerCase(), templeId: device.templeId, deviceId: device.deviceId, counterName: device.counterName,
       name, nakshatram: str(entry.nakshatram) || '', offering, amount,
-      occurredAt, day: templeDay(occurredAt, zone), receivedAt, printed: entry.printed === true,
+      occurredAt, day: templeDay(occurredAt, zone), receivedAt, paymentMode, printed: entry.printed === true,
     },
   };
 }
