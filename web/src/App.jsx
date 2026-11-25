@@ -9,6 +9,7 @@ import Offerings from './pages/Offerings.jsx';
 import Receipts from './pages/Receipts.jsx';
 import Reports from './pages/Reports.jsx';
 import Temples from './pages/Temples.jsx';
+import Today from './pages/Today.jsx';
 import Users from './pages/Users.jsx';
 
 const ICONS = {
@@ -28,7 +29,8 @@ const PLATFORM_NAV = [
 ];
 
 const NAV = [
-  { to: '/', label: 'Daily log', icon: 'log', roles: null },
+  { to: '/', label: 'Today', icon: 'report', roles: null },
+  { to: '/log', label: 'Daily log', icon: 'log', roles: null },
   { to: '/reports', label: 'Daily report', icon: 'report', roles: null },
   { to: '/receipts', label: 'Receipts', icon: 'receipt', roles: null },
   { to: '/offerings', label: 'Offerings & prices', icon: 'offering', roles: null },
@@ -145,7 +147,8 @@ export default function App() {
         <Routes key={temple?.id ?? 'none'}>
           {isSuper && <Route path="/platform" element={<Platform onOpen={(t) => openTemple(t)} />} />}
           {isSuper && <Route path="/temples" element={<Temples currentId={temple?.id} onOpen={(t) => openTemple(t)} />} />}
-          {temple && <Route path="/" element={<DailyLog />} />}
+          {temple && <Route path="/" element={<Today user={actor} />} />}
+          {temple && <Route path="/log" element={<DailyLog />} />}
           {temple && <Route path="/reports" element={<Reports user={actor} />} />}
           {temple && <Route path="/receipts" element={<Receipts user={actor} />} />}
           {temple && <Route path="/offerings" element={<Offerings user={actor} />} />}

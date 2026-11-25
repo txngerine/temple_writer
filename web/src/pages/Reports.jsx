@@ -37,7 +37,7 @@ export default function Reports({ user }) {
   );
 }
 
-function Reconciliation({ day, canClose }) {
+export function Reconciliation({ day, canClose }) {
   const { data, error, loading, reload } = useLoad(() => api('/reports/reconciliation', { query: { day } }), [day]);
   return (
     <section className="card">

@@ -93,6 +93,12 @@ const templeView = async (t) => {
   return { ...t.toPublic(), counters, users };
 };
 
+const shiftDay = (day, delta) => {
+  const d = new Date(`${day}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + delta);
+  return d.toISOString().slice(0, 10);
+};
+
 // Platform overview: one row per temple for the day, so the super admin sees
 // money and counter health without opening each temple in turn.
 router.get('/temples/overview', requireSuperadmin, wrap(async (req, res) => {
@@ -101,7 +107,7 @@ router.get('/temples/overview', requireSuperadmin, wrap(async (req, res) => {
   const temples = await Temple.find().sort({ name: 1 });
   const rows = await Promise.all(temples.map(async (t) => {
     const day = q || templeDay(new Date(), t.timezone);
-    const [sums, voided, devices, closes] = await Promise.all([
+    const [sums, voided, devices, closes, lastWeek] = await Promise.all([
       Receipt.aggregate([
         { $match: { templeId: t._id, day, voided: { $ne: true } } },
         { $group: { _id: '$paymentMode', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
@@ -109,19 +115,31 @@ router.get('/temples/overview', requireSuperadmin, wrap(async (req, res) => {
       Receipt.countDocuments({ templeId: t._id, day, voided: true }),
       Device.find({ templeId: t._id, revokedAt: null, enrolledAt: { $ne: null } }).lean(),
       DayClose.find({ templeId: t._id, day }).lean(),
+      Receipt.aggregate([
+        { $match: { templeId: t._id, day: shiftDay(day, -7), voided: { $ne: true } } },
+        { $group: { _id: null, amount: { $sum: '$amount' } } },
+      ]),
     ]);
     const mode = (m) => sums.filter((r) => (r._id || 'cash') === m).reduce((n, r) => n + r.amount, 0);
     const counters = devices.length;
+    const online = devices.filter(isOnline).length;
+    const unsynced = devices.reduce((n, d) => n + (d.pendingCount || 0), 0);
+    const short = closes.filter((c) => c.variance !== 0).length;
+    const collected = sums.reduce((n, r) => n + r.amount, 0);
+    // red: something is broken or money is missing; amber: worth a look; grey: nothing set up yet.
+    const health = !t.active || counters === 0 ? 'grey'
+      : (online < counters || short > 0) ? 'red'
+      : (unsynced > 0 || (collected === 0 && day === templeDay(new Date(), t.timezone))) ? 'amber' : 'green';
     return {
+      health, lastWeekCollected: lastWeek[0]?.amount || 0,
       id: t.id, name: t.name, code: t.code, active: t.active, day,
       collected: sums.reduce((n, r) => n + r.amount, 0),
       receipts: sums.reduce((n, r) => n + r.count, 0),
       cash: mode('cash'), digital: mode('upi') + mode('card'),
       voided,
-      counters, online: devices.filter(isOnline).length,
-      unsynced: devices.reduce((n, d) => n + (d.pendingCount || 0), 0),
+      counters, online, unsynced,
       closed: closes.length,
-      short: closes.filter((c) => c.variance !== 0).length,
+      short,
     };
   }));
   res.json({ temples: rows, total: { collected: rows.reduce((n, r) => n + r.collected, 0), receipts: rows.reduce((n, r) => n + r.receipts, 0) } });
@@ -460,6 +478,50 @@ router.post('/receipts/:id/void', office, wrap(async (req, res) => {
 }));
 
 // ---- reports ---------------------------------------------------------------
+
+// The temple office's landing page: today against the same weekday last week,
+// the hourly rush, counter status, what needs attention, and close progress.
+router.get('/reports/today', wrap(async (req, res) => {
+  const day = dayParam(req);
+  const templeId = req.temple._id;
+  const tz = req.temple.timezone;
+  const lastWeek = shiftDay(day, -7);
+  const live = { templeId, voided: { $ne: true } };
+  const [sums, lastWeekSum, hourly, top, voided, devices, recon] = await Promise.all([
+    Receipt.aggregate([{ $match: { ...live, day } },
+      { $group: { _id: '$paymentMode', count: { $sum: 1 }, amount: { $sum: '$amount' } } }]),
+    Receipt.aggregate([{ $match: { ...live, day: lastWeek } },
+      { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: '$amount' } } }]),
+    Receipt.aggregate([{ $match: { ...live, day } },
+      { $group: { _id: { $hour: { date: '$occurredAt', timezone: tz } }, count: { $sum: 1 }, amount: { $sum: '$amount' } } }]),
+    Receipt.aggregate([{ $match: { ...live, day } },
+      { $group: { _id: '$offering', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+      { $sort: { amount: -1 } }, { $limit: 5 }]),
+    Receipt.find({ templeId, day, voided: true }).sort({ voidedAt: -1 }).limit(10).lean(),
+    Device.find({ templeId, revokedAt: null, enrolledAt: { $ne: null } }).sort({ counterName: 1 }).lean(),
+    reconciliationFor(req.temple, day),
+  ]);
+  const mode = (m) => sums.filter((r) => (r._id || 'cash') === m).reduce((n, r) => n + r.amount, 0);
+  const byHour = new Map(hourly.map((h) => [h._id, h]));
+  const receiptsBy = new Map(recon.map((c) => [c.deviceId, c]));
+  res.json({
+    day, lastWeekDay: lastWeek,
+    total: { count: sums.reduce((n, r) => n + r.count, 0), amount: sums.reduce((n, r) => n + r.amount, 0), cash: mode('cash'), digital: mode('upi') + mode('card') },
+    lastWeek: { count: lastWeekSum[0]?.count || 0, amount: lastWeekSum[0]?.amount || 0 },
+    hourly: Array.from({ length: 24 }, (_, h) => ({ hour: h, count: byHour.get(h)?.count || 0, amount: byHour.get(h)?.amount || 0 })),
+    topOfferings: top.map((r) => ({ offering: r._id, count: r.count, amount: r.amount })),
+    counters: devices.map((d) => ({
+      deviceId: d.deviceId, counterName: d.counterName, online: isOnline(d), lastSeenAt: d.lastSeenAt,
+      pendingCount: d.pendingCount || 0, receipts: receiptsBy.get(d.deviceId)?.count || 0,
+    })),
+    voided: voided.map((r) => ({ id: r._id, name: r.name, offering: r.offering, amount: r.amount, reason: r.voidReason, counterName: r.counterName })),
+    close: {
+      total: recon.length,
+      closed: recon.filter((c) => c.close && !c.close.stale).length,
+      mismatched: recon.filter((c) => c.close && c.close.variance !== 0).length,
+    },
+  });
+}));
 
 router.get('/reports/daily', wrap(async (req, res) => {
   const day = dayParam(req);

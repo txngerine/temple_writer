@@ -1,13 +1,15 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Status, useLoad } from '../App.jsx';
-import { api, rupees, templeTime } from '../api/client.js';
+import { api, rupees, templeTime, templeToday } from '../api/client.js';
 
 const sum = (rows, k) => rows.reduce((n, r) => n + (r[k] || 0), 0);
 
 /** Platform super admin's landing page: every temple at a glance. */
 export default function Platform({ onOpen }) {
   const navigate = useNavigate();
-  const overview = useLoad(() => api('/temples/overview'), []);
+  const [day, setDay] = useState(templeToday());
+  const overview = useLoad(() => api('/temples/overview', { query: { day } }), [day]);
   const summary = useLoad(() => api('/temples/summary'), []);
   const temples = overview.data?.temples || [];
   const s = summary.data;
@@ -15,30 +17,36 @@ export default function Platform({ onOpen }) {
 
   return (
     <>
-      <header className="page-head"><h1>Dashboard</h1></header>
+      <header className="page-head">
+        <h1>Dashboard</h1>
+        <div className="filters">
+          <input type="date" value={day} max={templeToday()} onChange={(e) => setDay(e.target.value || templeToday())} />
+        </div>
+      </header>
       <Status loading={overview.loading} error={overview.error}>
         {overview.data && (
           <div className="tiles">
-            <div className="tile"><div className="tile-value">{rupees(overview.data.total.collected)}</div><div className="tile-label">Collected today</div></div>
-            <div className="tile"><div className="tile-value">{overview.data.total.receipts}</div><div className="tile-label">Receipts today</div></div>
+            <div className="tile"><div className="tile-value">{rupees(overview.data.total.collected)}</div><div className="tile-label">Collected</div></div>
+            <div className="tile"><div className="tile-value">{overview.data.total.receipts}</div><div className="tile-label">Receipts</div></div>
             <div className="tile"><div className="tile-value">{temples.filter((t) => t.active).length}</div><div className="tile-label">Active temples</div></div>
             <div className="tile"><div className="tile-value">{sum(temples, 'online')} / {sum(temples, 'counters')}</div><div className="tile-label">Counters online</div></div>
             <div className={`tile ${sum(temples, 'unsynced') ? 'warn' : ''}`}><div className="tile-value">{sum(temples, 'unsynced')}</div><div className="tile-label">Unsynced receipts</div></div>
-            <div className={`tile ${sum(temples, 'short') ? 'warn' : ''}`}><div className="tile-value">{sum(temples, 'short')}</div><div className="tile-label">Cash mismatches today</div></div>
+            <div className={`tile ${sum(temples, 'short') ? 'warn' : ''}`}><div className="tile-value">{sum(temples, 'short')}</div><div className="tile-label">Cash mismatches</div></div>
           </div>
         )}
       </Status>
 
       <section className="card">
-        <h2>Temples today</h2>
+        <h2>Temples</h2>
         {temples.length === 0 ? <div className="muted pad">No temples yet. Add one under Temples.</div> : (
           <table>
-            <thead><tr><th>Temple</th><th className="num">Collected</th><th className="num">Receipts</th><th className="num">Cash</th><th className="num">UPI / card</th><th className="num">Voided</th><th>Counters online</th><th className="num">Unsynced</th><th>Cash closed</th><th></th></tr></thead>
+            <thead><tr><th>Temple</th><th className="num">Collected</th><th className="num">vs last week</th><th className="num">Receipts</th><th className="num">Cash</th><th className="num">UPI / card</th><th className="num">Voided</th><th>Counters online</th><th className="num">Unsynced</th><th>Cash closed</th><th></th></tr></thead>
             <tbody>
               {temples.map((t) => (
                 <tr key={t.id} className={t.active ? '' : 'voided'}>
-                  <td>{t.name}{!t.active && <span className="muted"> (inactive)</span>}</td>
+                  <td><Health h={t.health} /> {t.name}{!t.active && <span className="muted"> (inactive)</span>}</td>
                   <td className="num">{rupees(t.collected)}</td>
+                  <td className="num">{t.lastWeekCollected ? `${t.collected >= t.lastWeekCollected ? '▲' : '▼'} ${Math.abs(Math.round(((t.collected - t.lastWeekCollected) / t.lastWeekCollected) * 100))}%` : '—'}</td>
                   <td className="num">{t.receipts}</td>
                   <td className="num">{rupees(t.cash)}</td>
                   <td className="num">{rupees(t.digital)}</td>
@@ -117,4 +125,13 @@ export default function Platform({ onOpen }) {
       </Status>
     </>
   );
+}
+
+const HEALTH = {
+  green: ['#2e7d32', 'Healthy'], amber: ['#e0a100', 'Worth a look: unsynced receipts, or no sales yet today'],
+  red: ['#c62828', 'Offline counter or cash mismatch'], grey: ['#9e9e9e', 'Inactive, or no counters yet'],
+};
+function Health({ h }) {
+  const [color, label] = HEALTH[h] || HEALTH.grey;
+  return <span title={label} aria-label={label} style={{ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: color, marginRight: 6 }} />;
 }

@@ -400,3 +400,28 @@ test('platform summary: super admin only, covers all temples with trend, alerts 
   assert.ok(res.body.warnings.every((w) => w.temple));
   assert.ok(Array.isArray(res.body.offlineCounters));
 });
+
+test('temple today page and platform health', async () => {
+  const today = templeDay();
+  const r = await api.get('/admin/reports/today').set(bearer(admin));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.hourly.length, 24);
+  assert.equal(r.body.hourly.reduce((n, h) => n + h.amount, 0), r.body.total.amount);
+  assert.equal(r.body.total.cash + r.body.total.digital, r.body.total.amount);
+  assert.ok(r.body.counters.length > 0);
+  assert.equal(r.body.lastWeekDay < today, true);
+  assert.deepEqual(Object.keys(r.body.close).sort(), ['closed', 'mismatched', 'total']);
+  assert.equal((await api.get('/admin/reports/today?day=nope').set(bearer(admin))).status, 400);
+  // Another temple sees none of it.
+  const other = await Temple.findOne({ code: 'other' });
+  const otherAdmin = (await api.post('/admin/auth/login').send({ email: 'admin@other.test', password: 'password-1' })).body.token;
+  const o = await api.get('/admin/reports/today').set(bearer(otherAdmin));
+  assert.deepEqual([o.body.total.amount, o.body.counters.length, other.code], [0, 0, 'other']);
+
+  const ov = await api.get('/admin/temples/overview').set(bearer(superadmin));
+  assert.ok(ov.body.temples.every((t) => ['green', 'amber', 'red', 'grey'].includes(t.health)));
+  assert.equal(ov.body.temples.find((t) => t.code === 'other').health, 'grey');
+  const past = await api.get('/admin/temples/overview?day=2026-01-05').set(bearer(superadmin));
+  assert.equal(past.body.temples[0].day, '2026-01-05');
+  assert.equal((await api.get('/admin/temples/overview?day=x').set(bearer(superadmin))).status, 400);
+});
