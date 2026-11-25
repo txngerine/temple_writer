@@ -3,7 +3,7 @@ import { Status, useLoad } from '../App.jsx';
 import { api } from '../api/client.js';
 
 // A temple admin can hand out these; the platform super admin is made from the server, never here.
-const ROLES = ['admin', 'supervisor', 'operator', 'ml'];
+const ROLES = ['admin', 'supervisor', 'operator'];
 const BLANK = { email: '', name: '', password: '', role: 'supervisor' };
 
 export default function Users({ user: me }) {

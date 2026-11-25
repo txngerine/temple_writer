@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 // `superadmin` runs the platform: creates temples and their admins, and belongs
 // to no temple. Every other role belongs to exactly one temple.
-export const TEMPLE_ROLES = ['admin', 'supervisor', 'operator', 'ml'];
+export const TEMPLE_ROLES = ['admin', 'supervisor', 'operator'];
 export const ROLES = ['superadmin', ...TEMPLE_ROLES];
 
 const UserSchema = new mongoose.Schema({

@@ -101,7 +101,7 @@ One deployment serves any number of temples.
   timezone and a first admin), switch a temple off, and can step into any temple
   from the panel to help. Made from the command line, since nobody exists yet to
   create it: `npm run create-superadmin -- owner@example.org 'a long password'`.
-- A **temple admin** (and `supervisor`, `operator`, `ml`) belongs to exactly one
+- A **temple admin** (and `supervisor`, `operator`) belongs to exactly one
   temple and only ever sees that temple's offerings and prices, counters,
   receipts, users and activity log. Staff cannot reach another temple, even by
   sending a different `X-Temple-Id`; that header only matters to the super admin.
@@ -381,7 +381,7 @@ only so the app can stop shipping them in Dart.
 | `receipts` | `_id` = device UUID, `deviceId`, `name`, `nakshatram`, `offering`, `amount`, `occurredAt`, `receivedAt`, `printed`, `voided` | Upsert on `_id`. Financial record — never expires, never hard-deleted. |
 | `devices` | `deviceId`, `counterName`, `tokenHash`, `appVersion`, `modelVersion`, `lastSeenAt`, `pendingCount` | Heartbeat target. One row per tablet. |
 | `temples` | `name`, `code`, `timezone`, `active` | One per temple. |
-| `users` | `email`, `passwordHash`, `role`, `templeId`, `active` | Roles: `superadmin` (no temple), `admin`, `supervisor`, `operator`, `ml`. |
+| `users` | `email`, `passwordHash`, `role`, `templeId`, `active` | Roles: `superadmin` (no temple), `admin`, `supervisor`, `operator`. |
 | `nakshatrams` | `mal`, `eng`, `order` | 27 rows, seeded, effectively read-only. |
 | `names` | `text`, `section`, `active`, `receiptCount` | The devotee dictionary, if you take it off the text file. Enforce the chillu rule: `രാജൻ`, never `രാജന്`. |
 

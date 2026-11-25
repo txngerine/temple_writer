@@ -127,6 +127,46 @@ router.get('/temples/overview', requireSuperadmin, wrap(async (req, res) => {
   res.json({ temples: rows, total: { collected: rows.reduce((n, r) => n + r.collected, 0), receipts: rows.reduce((n, r) => n + r.receipts, 0) } });
 }));
 
+// Platform dashboard: headline numbers, a 7-day trend, what needs attention,
+// and the latest warnings, across every temple.
+router.get('/temples/summary', requireSuperadmin, wrap(async (_req, res) => {
+  const temples = await Temple.find().sort({ name: 1 });
+  const nameOf = new Map(temples.map((t) => [String(t._id), t.name]));
+  const today = new Map(temples.map((t) => [String(t._id), templeDay(new Date(), t.timezone)]));
+  const dayList = (t) => Array.from({ length: 7 }, (_, i) => templeDay(new Date(Date.now() - i * 86400000), t.timezone));
+  const pairs = temples.flatMap((t) => dayList(t).map((day) => ({ templeId: t._id, day })));
+  const todayPairs = temples.map((t) => ({ templeId: t._id, day: today.get(String(t._id)) }));
+
+  const [trendRows, topRows, devices, closes, warnings] = await Promise.all([
+    pairs.length ? Receipt.aggregate([
+      { $match: { voided: { $ne: true }, $or: pairs } },
+      { $group: { _id: '$day', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+    ]) : [],
+    todayPairs.length ? Receipt.aggregate([
+      { $match: { voided: { $ne: true }, $or: todayPairs } },
+      { $group: { _id: '$offering', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
+      { $sort: { amount: -1 } }, { $limit: 5 },
+    ]) : [],
+    Device.find({ revokedAt: null, enrolledAt: { $ne: null } }).lean(),
+    todayPairs.length ? DayClose.find({ $or: todayPairs, variance: { $ne: 0 } }).lean() : [],
+    ActivityLog.find({ severity: { $in: ['warning', 'error'] }, templeId: { $ne: null } }).sort({ at: -1 }).limit(10).lean(),
+  ]);
+
+  const byDay = new Map(trendRows.map((r) => [r._id, r]));
+  const days = [...new Set(temples.flatMap(dayList))].sort().slice(-7);
+  res.json({
+    trend: days.map((day) => ({ day, amount: byDay.get(day)?.amount || 0, count: byDay.get(day)?.count || 0 })),
+    topOfferings: topRows.map((r) => ({ offering: r._id, count: r.count, amount: r.amount })),
+    offlineCounters: devices.filter((d) => !isOnline(d)).map((d) => ({
+      temple: nameOf.get(String(d.templeId)), counterName: d.counterName, lastSeenAt: d.lastSeenAt, pendingCount: d.pendingCount || 0,
+    })),
+    mismatches: closes.map((c) => ({
+      temple: nameOf.get(String(c.templeId)), counterName: c.counterName, variance: c.variance, note: c.note,
+    })),
+    warnings: warnings.map((l) => ({ at: l.at, temple: nameOf.get(String(l.templeId)), type: l.type, severity: l.severity, message: l.message })),
+  });
+}));
+
 router.get('/temples', requireSuperadmin, wrap(async (_req, res) => {
   const temples = await Temple.find().sort({ name: 1 });
   res.json({ temples: await Promise.all(temples.map(templeView)) });

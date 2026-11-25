@@ -4,6 +4,7 @@ import { api, getTempleId, getToken, setTempleId, setTempleZone, setToken, setUn
 import DailyLog from './pages/DailyLog.jsx';
 import Devices from './pages/Devices.jsx';
 import Login from './pages/Login.jsx';
+import Platform from './pages/Platform.jsx';
 import Offerings from './pages/Offerings.jsx';
 import Receipts from './pages/Receipts.jsx';
 import Reports from './pages/Reports.jsx';
@@ -21,7 +22,10 @@ const ICONS = {
 };
 
 // Super admin only: managing the temples themselves.
-const PLATFORM_NAV = [{ to: '/temples', label: 'Temples', icon: 'temples' }];
+const PLATFORM_NAV = [
+  { to: '/platform', label: 'Dashboard', icon: 'report' },
+  { to: '/temples', label: 'Temples', icon: 'temples' },
+];
 
 const NAV = [
   { to: '/', label: 'Daily log', icon: 'log', roles: null },
@@ -139,6 +143,7 @@ export default function App() {
         )}
         {/* Keyed by temple so switching temples never shows the last one's data. */}
         <Routes key={temple?.id ?? 'none'}>
+          {isSuper && <Route path="/platform" element={<Platform onOpen={(t) => openTemple(t)} />} />}
           {isSuper && <Route path="/temples" element={<Temples currentId={temple?.id} onOpen={(t) => openTemple(t)} />} />}
           {temple && <Route path="/" element={<DailyLog />} />}
           {temple && <Route path="/reports" element={<Reports user={actor} />} />}
@@ -146,7 +151,7 @@ export default function App() {
           {temple && <Route path="/offerings" element={<Offerings user={actor} />} />}
           {temple && <Route path="/devices" element={<Devices user={actor} />} />}
           {temple && actor.role === 'admin' && <Route path="/users" element={<Users user={actor} />} />}
-          <Route path="*" element={<Navigate to={isSuper && !temple ? '/temples' : '/'} replace />} />
+          <Route path="*" element={<Navigate to={isSuper && !temple ? '/platform' : '/'} replace />} />
         </Routes>
       </main>
     </div>

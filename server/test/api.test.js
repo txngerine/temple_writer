@@ -39,7 +39,7 @@ before(async () => {
   superadmin = await signIn('super@t.test', 'superadmin');
   admin = await signIn('admin@t.test', 'admin');
   supervisor = await signIn('sup@t.test', 'supervisor');
-  viewer = await signIn('ml@t.test', 'ml');
+  viewer = await signIn('op@t.test', 'operator');
 });
 
 after(async () => {
@@ -224,7 +224,7 @@ test('users: admin only, role changes are logged, and an admin cannot lock thems
   assert.equal((await logsOf('user.role.changed'))[0].meta.previousRole, 'operator');
 
   const me = (await api.get('/admin/auth/me').set(bearer(admin))).body.user;
-  assert.equal((await api.patch(`/admin/users/${me.id}`).set(bearer(admin)).send({ role: 'ml' })).status, 400);
+  assert.equal((await api.patch(`/admin/users/${me.id}`).set(bearer(admin)).send({ role: 'operator' })).status, 400);
 
   // Deactivating an account ends its session at once.
   const sup = (await api.get('/admin/users').set(bearer(admin))).body.users.find((u) => u.email === 'sup@t.test');
@@ -387,4 +387,16 @@ test('day close: expected cash per counter, mismatch needs a note, re-closing up
   const mine = ov.body.temples.find((t) => t.code === 'test');
   assert.deepEqual([mine.collected, mine.digital, mine.closed], [mine.cash + 40, 40, 1]);
   assert.equal(ov.body.temples.find((t) => t.code === 'other').collected, 0);
+});
+
+test('platform summary: super admin only, covers all temples with trend, alerts and warnings', async () => {
+  assert.equal((await api.get('/admin/temples/summary').set(bearer(admin))).status, 403);
+  const res = await api.get('/admin/temples/summary').set(bearer(superadmin));
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal(res.body.trend.length, 7);
+  assert.ok(res.body.trend.some((d) => d.amount > 0));
+  assert.ok(res.body.topOfferings.length > 0);
+  assert.ok(res.body.mismatches.every((m) => m.variance !== 0));
+  assert.ok(res.body.warnings.every((w) => w.temple));
+  assert.ok(Array.isArray(res.body.offlineCounters));
 });
