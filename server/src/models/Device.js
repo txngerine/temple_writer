@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 
 const DeviceSchema = new mongoose.Schema({
   deviceId:    { type: String, required: true, unique: true },
+  templeId:    { type: mongoose.Types.ObjectId, ref: 'Temple', required: true, index: true },
   counterName: { type: String, required: true, trim: true },
   tokenHash:   { type: String, index: true },
   // Set by the office when the counter is registered; the tablet trades it for

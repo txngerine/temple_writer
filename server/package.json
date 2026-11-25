@@ -3,14 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "node --watch src/index.js",
     "dev:memory": "node src/scripts/dev-memory.js",
     "start": "node src/index.js",
     "seed": "node src/scripts/seed.js",
     "create-admin": "node src/scripts/create-admin.js",
-    "test": "node --test"
+    "test": "node --test",
+    "create-superadmin": "node src/scripts/create-superadmin.js",
+    "migrate:multi-temple": "node src/scripts/migrate-multi-temple.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

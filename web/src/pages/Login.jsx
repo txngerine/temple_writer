@@ -12,9 +12,9 @@ export default function Login({ onSignedIn }) {
     setBusy(true);
     setError(null);
     try {
-      const { token, user } = await api('/auth/login', { method: 'POST', body: { email, password } });
+      const { token, user, temple } = await api('/auth/login', { method: 'POST', body: { email, password } });
       setToken(token);
-      onSignedIn(user);
+      onSignedIn(user, temple);
     } catch (err) {
       setError(err.message);
     } finally {

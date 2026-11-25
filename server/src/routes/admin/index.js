@@ -5,13 +5,15 @@ import ActivityLog from '../../models/ActivityLog.js';
 import Device from '../../models/Device.js';
 import Offering from '../../models/Offering.js';
 import Receipt from '../../models/Receipt.js';
-import User, { ROLES } from '../../models/User.js';
+import Temple from '../../models/Temple.js';
+import User, { TEMPLE_ROLES } from '../../models/User.js';
 import {
-  HttpError, hashSecret, newSecret, requireRole, requireUser, signUserToken, wrap,
+  HttpError, hashSecret, newSecret, requireRole, requireSuperadmin, requireTemple, requireUser, signUserToken, wrap,
 } from '../../middleware/auth.js';
 import { logActivity } from '../../services/activity.js';
-import { isDay, templeDay } from '../../services/day.js';
+import { clearZoneCache, isDay, isZone, templeDay } from '../../services/day.js';
 import { isOnline } from '../../services/presence.js';
+import { seedOfferings } from '../../scripts/seed.js';
 import { newDeviceId } from '../device/index.js';
 
 const router = Router();
@@ -20,7 +22,7 @@ const adminOnly = requireRole('admin');
 
 const dayParam = (req) => {
   const { day } = req.query;
-  if (day === undefined || day === '') return templeDay();
+  if (day === undefined || day === '') return templeDay(new Date(), req.temple.timezone);
   if (!isDay(day)) throw new HttpError(400, 'day must be YYYY-MM-DD');
   return day;
 };
@@ -39,18 +41,127 @@ router.post('/auth/login', wrap(async (req, res) => {
   // Same answer for a wrong address and a wrong password.
   const ok = user && user.active && await bcrypt.compare(password, user.passwordHash);
   if (!ok) throw new HttpError(401, 'Wrong email or password');
-  res.json({ token: signUserToken(user), user: user.toPublic() });
+  let temple = null;
+  if (user.role !== 'superadmin') {
+    temple = await Temple.findById(user.templeId);
+    if (!temple?.active) throw new HttpError(403, 'This temple is not active');
+  }
+  res.json({ token: signUserToken(user), user: user.toPublic(), temple: temple?.toPublic() ?? null });
 }));
 
 router.use(requireUser);
 
-router.get('/auth/me', (req, res) => res.json({ user: req.user.toPublic() }));
+router.get('/auth/me', (req, res) => res.json({
+  user: req.user.toPublic(),
+  temple: req.user.role === 'superadmin' ? null : req.temple.toPublic(),
+}));
+
+// ---- temples (platform super admin) ----------------------------------------
+
+const validationMessage = (err) => {
+  if (err?.code === 11000) return 'That already exists';
+  if (err?.name === 'ValidationError') return Object.values(err.errors).map((e) => e.message).join(' ');
+  return null;
+};
+
+async function createUserIn(templeId, { email, name, password, role }, actor) {
+  if (!email || !password || String(password).length < 8) throw new HttpError(400, 'Email and a password of at least 8 characters are required');
+  if (!TEMPLE_ROLES.includes(role)) throw new HttpError(400, `role must be one of ${TEMPLE_ROLES.join(', ')}`);
+  let user;
+  try {
+    user = await User.create({ email, name, role, templeId, passwordHash: await bcrypt.hash(String(password), 10) });
+  } catch (err) {
+    const msg = validationMessage(err);
+    if (msg) throw new HttpError(400, err.code === 11000 ? 'That email already has an account' : msg);
+    throw err;
+  }
+  await logActivity({
+    templeId, type: 'user.created', actorType: 'user', userId: actor._id,
+    objectType: 'user', objectId: user.id,
+    message: `${actor.email} created ${user.email} as ${user.role}`,
+    meta: { role: user.role, changedBy: actor.email },
+  });
+  return user;
+}
+
+const templeView = async (t) => {
+  const [counters, users] = await Promise.all([
+    Device.countDocuments({ templeId: t._id, revokedAt: null }),
+    User.countDocuments({ templeId: t._id }),
+  ]);
+  return { ...t.toPublic(), counters, users };
+};
+
+router.get('/temples', requireSuperadmin, wrap(async (_req, res) => {
+  const temples = await Temple.find().sort({ name: 1 });
+  res.json({ temples: await Promise.all(temples.map(templeView)) });
+}));
+
+// Creates a temple, loads its offering list, and (optionally) its first admin.
+router.post('/temples', requireSuperadmin, wrap(async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  const code = String(req.body?.code || '').trim().toLowerCase();
+  const timezone = req.body?.timezone || 'Asia/Kolkata';
+  if (!name) throw new HttpError(400, 'Temple name is required');
+  if (!isZone(timezone)) throw new HttpError(400, 'Unknown timezone');
+  const admin = req.body?.admin;
+  if (admin && (!admin.email || String(admin.password || '').length < 8)) {
+    throw new HttpError(400, 'The temple admin needs an email and a password of at least 8 characters');
+  }
+  let temple;
+  try {
+    temple = await Temple.create({ name, code, timezone });
+  } catch (err) {
+    const msg = validationMessage(err);
+    if (msg) throw new HttpError(400, err.code === 11000 ? 'That temple code is taken' : msg.replace(/Path `code`.*/, 'Code must be 2-40 letters, digits or dashes'));
+    throw err;
+  }
+  await seedOfferings(temple._id);
+  let adminUser = null;
+  if (admin) {
+    try {
+      adminUser = await createUserIn(temple._id, { ...admin, role: 'admin' }, req.user);
+    } catch (err) {
+      // Do not leave a temple nobody can sign in to because the admin was refused.
+      await Promise.all([Temple.deleteOne({ _id: temple._id }), Offering.deleteMany({ templeId: temple._id })]);
+      throw err;
+    }
+  }
+  await logActivity({
+    templeId: temple._id, type: 'temple.created', actorType: 'user', userId: req.user._id,
+    objectType: 'temple', objectId: temple.id, message: `${req.user.email} created temple ${temple.name}`,
+  });
+  res.status(201).json({ temple: await templeView(temple), admin: adminUser?.toPublic() ?? null });
+}));
+
+router.patch('/temples/:id', requireSuperadmin, wrap(async (req, res) => {
+  const temple = await Temple.findById(objectId(req.params.id));
+  if (!temple) throw new HttpError(404, 'Temple not found');
+  const { name, timezone, active } = req.body || {};
+  if (typeof name === 'string' && name.trim()) temple.name = name.trim();
+  if (timezone !== undefined) {
+    if (!isZone(timezone)) throw new HttpError(400, 'Unknown timezone');
+    temple.timezone = timezone;
+  }
+  if (typeof active === 'boolean') temple.active = active;
+  await temple.save();
+  clearZoneCache();
+  await logActivity({
+    templeId: temple._id, type: 'temple.updated', actorType: 'user', userId: req.user._id,
+    objectType: 'temple', objectId: temple.id, message: `${req.user.email} updated temple ${temple.name}`,
+    meta: { name: temple.name, timezone: temple.timezone, active: temple.active },
+  });
+  res.json({ temple: await templeView(temple) });
+}));
+
+// Everything below belongs to one temple.
+router.use(requireTemple);
 
 // ---- activity log ----------------------------------------------------------
 
 router.get('/logs', wrap(async (req, res) => {
   const day = dayParam(req);
-  const filter = { day };
+  const filter = { templeId: req.temple._id, day };
   for (const key of ['type', 'deviceId', 'actorType', 'severity']) {
     if (typeof req.query[key] === 'string' && req.query[key]) filter[key] = req.query[key];
   }
@@ -65,7 +176,7 @@ router.get('/logs', wrap(async (req, res) => {
 router.get('/logs/summary', wrap(async (req, res) => {
   const day = dayParam(req);
   const rows = await ActivityLog.aggregate([
-    { $match: { day } },
+    { $match: { templeId: req.temple._id, day } },
     { $group: { _id: { type: '$type', severity: '$severity' }, count: { $sum: 1 } } },
   ]);
   const byType = {};
@@ -99,14 +210,8 @@ function applyOfferingBody(offering, body) {
   }
 }
 
-const validationMessage = (err) => {
-  if (err?.code === 11000) return 'That already exists';
-  if (err?.name === 'ValidationError') return Object.values(err.errors).map((e) => e.message).join(' ');
-  return null;
-};
-
-router.get('/offerings', wrap(async (_req, res) => {
-  const offerings = await Offering.find().sort({ sortOrder: 1, labelEng: 1 });
+router.get('/offerings', wrap(async (req, res) => {
+  const offerings = await Offering.find({ templeId: req.temple._id }).sort({ sortOrder: 1, labelEng: 1 });
   res.json({ offerings: offerings.map(offeringView) });
 }));
 
@@ -128,7 +233,7 @@ router.post('/offerings/import', office, wrap(async (req, res) => {
   if (rows.length === 0) throw new HttpError(400, 'The sheet has no rows to import');
   if (rows.length > 500) throw new HttpError(413, 'Import at most 500 offerings at a time');
 
-  const existing = new Map((await Offering.find()).map((o) => [o.labelMal, o]));
+  const existing = new Map((await Offering.find({ templeId: req.temple._id })).map((o) => [o.labelMal, o]));
   let nextSort = Math.max(0, ...[...existing.values()].map((o) => o.sortOrder || 0)) + 10;
   const seen = new Set();
   const results = [];
@@ -155,7 +260,7 @@ router.post('/offerings/import', office, wrap(async (req, res) => {
     // Priced, or deliberately devotee-chosen, means ready for the counters unless
     // the sheet says otherwise.
     const active = typeof raw.active === 'boolean' ? raw.active : (priceIsFixed ? price != null : true);
-    const target = doc || new Offering({ labelMal, sortOrder: nextSort });
+    const target = doc || new Offering({ templeId: req.temple._id, labelMal, sortOrder: nextSort });
     const before = doc ? offeringView(doc) : null;
     if (labelEng) target.labelEng = labelEng;
     target.priceIsFixed = priceIsFixed;
@@ -174,7 +279,7 @@ router.post('/offerings/import', office, wrap(async (req, res) => {
     if (!dryRun) {
       await target.save();
       await logActivity({
-        type: doc ? 'offering.updated' : 'offering.created', actorType: 'user', userId: req.user._id,
+        templeId: req.temple._id, type: doc ? 'offering.updated' : 'offering.created', actorType: 'user', userId: req.user._id,
         objectType: 'offering', objectId: target.id,
         message: `${req.user.email} ${doc ? 'updated' : 'added'} ${target.labelEng} (spreadsheet import)`,
         meta: { before, after: offeringView(target), source: 'import' },
@@ -190,7 +295,7 @@ router.post('/offerings/import', office, wrap(async (req, res) => {
 }));
 
 router.post('/offerings', office, wrap(async (req, res) => {
-  const offering = new Offering();
+  const offering = new Offering({ templeId: req.temple._id });
   applyOfferingBody(offering, req.body);
   offering.updatedBy = req.user._id;
   try {
@@ -201,7 +306,7 @@ router.post('/offerings', office, wrap(async (req, res) => {
     throw err;
   }
   await logActivity({
-    type: 'offering.created', actorType: 'user', userId: req.user._id,
+    templeId: req.temple._id, type: 'offering.created', actorType: 'user', userId: req.user._id,
     objectType: 'offering', objectId: offering.id,
     message: `${req.user.email} added offering ${offering.labelEng}`,
     meta: { before: null, after: offeringView(offering) },
@@ -210,7 +315,7 @@ router.post('/offerings', office, wrap(async (req, res) => {
 }));
 
 router.patch('/offerings/:id', office, wrap(async (req, res) => {
-  const offering = await Offering.findById(objectId(req.params.id));
+  const offering = await Offering.findOne({ _id: objectId(req.params.id), templeId: req.temple._id });
   if (!offering) throw new HttpError(404, 'Offering not found');
   const before = offeringView(offering);
   applyOfferingBody(offering, req.body);
@@ -228,7 +333,7 @@ router.patch('/offerings/:id', office, wrap(async (req, res) => {
     // Price changes are versioned here, not overwritten, so a receipt from
     // last month can be explained.
     await logActivity({
-      type: 'offering.updated', actorType: 'user', userId: req.user._id,
+      templeId: req.temple._id, type: 'offering.updated', actorType: 'user', userId: req.user._id,
       objectType: 'offering', objectId: offering.id,
       message: `${req.user.email} changed ${offering.labelEng}: ${changed.join(', ')}`,
       meta: {
@@ -243,7 +348,7 @@ router.patch('/offerings/:id', office, wrap(async (req, res) => {
 // ---- receipts --------------------------------------------------------------
 
 router.get('/receipts', wrap(async (req, res) => {
-  const filter = {};
+  const filter = { templeId: req.temple._id };
   if (req.query.day) filter.day = dayParam(req);
   if (typeof req.query.deviceId === 'string' && req.query.deviceId) filter.deviceId = req.query.deviceId;
   if (typeof req.query.offering === 'string' && req.query.offering) filter.offering = req.query.offering;
@@ -263,13 +368,13 @@ router.get('/receipts', wrap(async (req, res) => {
 router.post('/receipts/:id/void', office, wrap(async (req, res) => {
   const reason = String(req.body?.reason || '').trim();
   if (!reason) throw new HttpError(400, 'A reason is required to void a receipt');
-  const receipt = await Receipt.findById(String(req.params.id).toLowerCase());
+  const receipt = await Receipt.findOne({ _id: String(req.params.id).toLowerCase(), templeId: req.temple._id });
   if (!receipt) throw new HttpError(404, 'Receipt not found');
   if (receipt.voided) throw new HttpError(409, 'Receipt is already voided');
   Object.assign(receipt, { voided: true, voidedAt: new Date(), voidedBy: req.user._id, voidReason: reason });
   await receipt.save();
   await logActivity({
-    type: 'receipt.voided', severity: 'warning', actorType: 'user', userId: req.user._id,
+    templeId: req.temple._id, type: 'receipt.voided', severity: 'warning', actorType: 'user', userId: req.user._id,
     deviceId: receipt.deviceId, counterName: receipt.counterName,
     objectType: 'receipt', objectId: receipt.id,
     message: `${req.user.email} voided ₹${receipt.amount} ${receipt.offering} for ${receipt.name}`,
@@ -284,7 +389,7 @@ router.post('/receipts/:id/void', office, wrap(async (req, res) => {
 router.get('/reports/daily', wrap(async (req, res) => {
   const day = dayParam(req);
   const group = (key) => Receipt.aggregate([
-    { $match: { day, voided: { $ne: true } } },
+    { $match: { templeId: req.temple._id, day, voided: { $ne: true } } },
     { $group: { _id: key, count: { $sum: 1 }, amount: { $sum: '$amount' } } },
     { $sort: { amount: -1 } },
   ]);
@@ -292,7 +397,7 @@ router.get('/reports/daily', wrap(async (req, res) => {
     group('$offering'),
     group({ deviceId: '$deviceId', counterName: '$counterName' }),
     Receipt.aggregate([
-      { $match: { day, voided: true } },
+      { $match: { templeId: req.temple._id, day, voided: true } },
       { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: '$amount' } } },
     ]),
   ]);
@@ -315,8 +420,8 @@ const deviceView = (d) => ({
   online: isOnline(d),
 });
 
-router.get('/devices', wrap(async (_req, res) => {
-  const devices = await Device.find().sort({ counterName: 1 });
+router.get('/devices', wrap(async (req, res) => {
+  const devices = await Device.find({ templeId: req.temple._id }).sort({ counterName: 1 });
   res.json({ devices: devices.map(deviceView) });
 }));
 
@@ -327,20 +432,20 @@ router.post('/devices', adminOnly, wrap(async (req, res) => {
   if (!counterName) throw new HttpError(400, 'counterName required');
   const enrollCode = newSecret(5).toUpperCase();
   const device = await Device.create({
-    deviceId: newDeviceId(), counterName, enrollCodeHash: hashSecret(enrollCode), enrolledBy: req.user._id,
+    templeId: req.temple._id, deviceId: newDeviceId(), counterName, enrollCodeHash: hashSecret(enrollCode), enrolledBy: req.user._id,
   });
   res.status(201).json({ device: deviceView(device), enrollCode });
 }));
 
 router.post('/devices/:id/revoke', adminOnly, wrap(async (req, res) => {
-  const device = await Device.findById(objectId(req.params.id));
+  const device = await Device.findOne({ _id: objectId(req.params.id), templeId: req.temple._id });
   if (!device) throw new HttpError(404, 'Device not found');
   if (device.revokedAt) throw new HttpError(409, 'Device is already revoked');
   const reason = String(req.body?.reason || '').trim();
   Object.assign(device, { revokedAt: new Date(), tokenHash: undefined, enrollCodeHash: undefined });
   await device.save();
   await logActivity({
-    type: 'device.revoked', severity: 'warning', actorType: 'user', userId: req.user._id,
+    templeId: req.temple._id, type: 'device.revoked', severity: 'warning', actorType: 'user', userId: req.user._id,
     deviceId: device.deviceId, counterName: device.counterName,
     objectType: 'device', objectId: device.deviceId,
     message: `${req.user.email} revoked ${device.counterName}`,
@@ -351,44 +456,28 @@ router.post('/devices/:id/revoke', adminOnly, wrap(async (req, res) => {
 
 // ---- users -----------------------------------------------------------------
 
-router.get('/users', adminOnly, wrap(async (_req, res) => {
-  const users = await User.find().sort({ email: 1 });
+router.get('/users', adminOnly, wrap(async (req, res) => {
+  const users = await User.find({ templeId: req.temple._id }).sort({ email: 1 });
   res.json({ users: users.map((u) => u.toPublic()) });
 }));
 
 router.post('/users', adminOnly, wrap(async (req, res) => {
-  const { email, name, password, role } = req.body || {};
-  if (!email || !password || String(password).length < 8) throw new HttpError(400, 'Email and a password of at least 8 characters are required');
-  if (!ROLES.includes(role)) throw new HttpError(400, `role must be one of ${ROLES.join(', ')}`);
-  let user;
-  try {
-    user = await User.create({ email, name, role, passwordHash: await bcrypt.hash(String(password), 10) });
-  } catch (err) {
-    const msg = validationMessage(err);
-    if (msg) throw new HttpError(400, err.code === 11000 ? 'That email already has an account' : msg);
-    throw err;
-  }
-  await logActivity({
-    type: 'user.created', actorType: 'user', userId: req.user._id,
-    objectType: 'user', objectId: user.id,
-    message: `${req.user.email} created ${user.email} as ${user.role}`,
-    meta: { role: user.role, changedBy: req.user.email },
-  });
+  const user = await createUserIn(req.temple._id, req.body || {}, req.user);
   res.status(201).json({ user: user.toPublic() });
 }));
 
 router.patch('/users/:id', adminOnly, wrap(async (req, res) => {
-  const user = await User.findById(objectId(req.params.id));
+  const user = await User.findOne({ _id: objectId(req.params.id), templeId: req.temple._id });
   if (!user) throw new HttpError(404, 'User not found');
   const { role, active, name, password } = req.body || {};
   const self = user.id === req.user.id;
-  // The panel must never be left with nobody able to administer it.
+  // The temple must never be left with nobody able to administer it.
   if (self && ((role !== undefined && role !== 'admin') || active === false)) {
     throw new HttpError(400, 'You cannot remove your own admin access');
   }
   const before = user.role;
   if (role !== undefined) {
-    if (!ROLES.includes(role)) throw new HttpError(400, `role must be one of ${ROLES.join(', ')}`);
+    if (!TEMPLE_ROLES.includes(role)) throw new HttpError(400, `role must be one of ${TEMPLE_ROLES.join(', ')}`);
     user.role = role;
   }
   if (typeof active === 'boolean') user.active = active;
@@ -400,7 +489,7 @@ router.patch('/users/:id', adminOnly, wrap(async (req, res) => {
   await user.save();
   if (before !== user.role) {
     await logActivity({
-      type: 'user.role.changed', actorType: 'user', userId: req.user._id,
+      templeId: req.temple._id, type: 'user.role.changed', actorType: 'user', userId: req.user._id,
       objectType: 'user', objectId: user.id,
       message: `${req.user.email} changed ${user.email} from ${before} to ${user.role}`,
       meta: { role: user.role, previousRole: before, changedBy: req.user.email },

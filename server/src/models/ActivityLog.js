@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 
 const ActivityLogSchema = new mongoose.Schema({
+  templeId:   { type: mongoose.Types.ObjectId, ref: 'Temple', index: true },  // unset for platform-level events
   day:        { type: String, required: true },   // "2026-09-03", temple-local
   at:         { type: Date,   required: true },   // server receive time, UTC
   occurredAt: { type: Date },                     // device time, when it differs
@@ -19,9 +20,9 @@ const ActivityLogSchema = new mongoose.Schema({
   meta:       { type: Object },
 }, { timestamps: false });
 
-ActivityLogSchema.index({ day: 1, at: -1 });
-ActivityLogSchema.index({ deviceId: 1, at: -1 });
-ActivityLogSchema.index({ type: 1, at: -1 });
+ActivityLogSchema.index({ templeId: 1, day: 1, at: -1 });
+ActivityLogSchema.index({ templeId: 1, deviceId: 1, at: -1 });
+ActivityLogSchema.index({ templeId: 1, type: 1, at: -1 });
 ActivityLogSchema.index({ objectType: 1, objectId: 1 });
 // Only info rows expire after a year; warnings and errors are kept.
 ActivityLogSchema.index(

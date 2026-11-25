@@ -4,6 +4,16 @@ const TOKEN_KEY = 'temple-admin-token';
 export const getToken = () => localStorage.getItem(TOKEN_KEY);
 export const setToken = (t) => (t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY));
 
+// The temple a super admin has stepped into. Temple staff never set this: the
+// server puts them in their own temple whatever the header says.
+const TEMPLE_KEY = 'temple-admin-temple';
+export const getTempleId = () => localStorage.getItem(TEMPLE_KEY);
+export const setTempleId = (id) => (id ? localStorage.setItem(TEMPLE_KEY, id) : localStorage.removeItem(TEMPLE_KEY));
+
+let zone = 'Asia/Kolkata';
+export const setTempleZone = (tz) => { zone = tz || 'Asia/Kolkata'; };
+export const templeZone = () => zone;
+
 let onUnauthorized = () => {};
 export const setUnauthorizedHandler = (fn) => { onUnauthorized = fn; };
 
@@ -19,6 +29,7 @@ export async function api(path, { method = 'GET', body, query } = {}) {
       headers: {
         ...(body ? { 'Content-Type': 'application/json' } : {}),
         ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}),
+        ...(getTempleId() ? { 'X-Temple-Id': getTempleId() } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
     });
@@ -36,7 +47,7 @@ export async function api(path, { method = 'GET', body, query } = {}) {
 
 /** Today's date in the temple's timezone, as YYYY-MM-DD. */
 export const templeToday = () =>
-  new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+  new Intl.DateTimeFormat('en-CA', { timeZone: zone }).format(new Date());
 
 export const rupees = (n) =>
   new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(n ?? 0);
@@ -44,7 +55,7 @@ export const rupees = (n) =>
 export const templeTime = (iso, withDate = false) =>
   iso
     ? new Intl.DateTimeFormat('en-IN', {
-        timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true,
+        timeZone: zone, hour: '2-digit', minute: '2-digit', hour12: true,
         ...(withDate ? { day: '2-digit', month: 'short', year: 'numeric' } : {}),
       }).format(new Date(iso))
     : '—';

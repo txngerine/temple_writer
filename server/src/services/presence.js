@@ -30,7 +30,7 @@ export async function checkPresence(now = new Date()) {
       await d.save();
       if (was === 'offline') {
         await logActivity({
-          type: 'device.online', actorType: 'system', deviceId: d.deviceId, counterName: d.counterName,
+          templeId: d.templeId, type: 'device.online', actorType: 'system', deviceId: d.deviceId, counterName: d.counterName,
           objectType: 'device', objectId: d.deviceId, message: `${d.counterName} is back online`,
         });
       }
@@ -38,7 +38,7 @@ export async function checkPresence(now = new Date()) {
       d.presence = 'offline';
       await d.save();
       await logActivity({
-        type: 'device.offline', severity: 'warning', actorType: 'system',
+        templeId: d.templeId, type: 'device.offline', severity: 'warning', actorType: 'system',
         deviceId: d.deviceId, counterName: d.counterName,
         objectType: 'device', objectId: d.deviceId, message: `${d.counterName} went offline`,
         meta: { lastSeenAt: d.lastSeenAt },

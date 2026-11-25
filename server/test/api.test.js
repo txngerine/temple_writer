@@ -13,17 +13,18 @@ process.env.TEMPLE_TZ = 'Asia/Kolkata';
 const { createApp } = await import('../src/app.js');
 const { seed } = await import('../src/scripts/seed.js');
 const { default: User } = await import('../src/models/User.js');
+const { default: Temple } = await import('../src/models/Temple.js');
 const { default: ActivityLog } = await import('../src/models/ActivityLog.js');
 const { default: Name } = await import('../src/models/Name.js');
 const { templeDay } = await import('../src/services/day.js');
 
-let mongo, api, admin, supervisor, viewer, deviceToken, deviceRow;
+let mongo, api, temple, admin, supervisor, viewer, superadmin, deviceToken, deviceRow;
 const bearer = (t) => ({ Authorization: `Bearer ${t}` });
 const dev = () => ({ Authorization: `Device ${deviceToken}` });
 const logsOf = (type) => ActivityLog.find({ type }).sort({ at: 1, _id: 1 }).lean();
 
-async function signIn(email, role) {
-  await User.create({ email, role, passwordHash: await bcrypt.hash('password-1', 4) });
+async function signIn(email, role, templeId = temple?._id) {
+  await User.create({ email, role, templeId, passwordHash: await bcrypt.hash('password-1', 4) });
   const res = await api.post('/admin/auth/login').send({ email, password: 'password-1' });
   assert.equal(res.status, 200);
   return res.body.token;
@@ -34,6 +35,8 @@ before(async () => {
   await mongoose.connect(mongo.getUri('test'));
   await mongoose.connection.syncIndexes();
   api = request(createApp());
+  temple = await Temple.create({ name: 'Test Temple', code: 'test' });
+  superadmin = await signIn('super@t.test', 'superadmin');
   admin = await signIn('admin@t.test', 'admin');
   supervisor = await signIn('sup@t.test', 'supervisor');
   viewer = await signIn('ml@t.test', 'ml');
@@ -45,8 +48,8 @@ after(async () => {
 });
 
 test('seed loads 27 nakshatrams and 19 unpriced, inactive offerings, and is re-runnable', async () => {
-  assert.deepEqual(await seed(), { nakshatrams: 27, offerings: 19 });
-  assert.deepEqual(await seed(), { nakshatrams: 0, offerings: 0 });
+  assert.deepEqual(await seed(temple._id), { nakshatrams: 27, offerings: 19 });
+  assert.deepEqual(await seed(temple._id), { nakshatrams: 0, offerings: 0 });
   const { body } = await api.get('/admin/offerings').set(bearer(admin));
   assert.equal(body.offerings.length, 19);
   assert.ok(body.offerings.every((o) => o.price === null && o.active === false));
@@ -234,4 +237,112 @@ test('the name dictionary enforces the chillu rule', async () => {
   await Name.create({ text: 'രാജൻ' });
   await Name.create({ text: 'കൊച്ചുപെണ്ണ്' });
   await Name.create({ text: 'അശോക്' });
+});
+
+// ---- multi-temple ----------------------------------------------------------
+
+test('only the super admin creates temples; a new temple gets its own offerings and admin', async () => {
+  assert.equal((await api.get('/admin/temples').set(bearer(admin))).status, 403);
+  assert.equal((await api.post('/admin/temples').set(bearer(admin)).send({ name: 'X', code: 'xx' })).status, 403);
+
+  const bad = await api.post('/admin/temples').set(bearer(superadmin)).send({ name: 'Bad', code: 'bad', timezone: 'Mars/Base' });
+  assert.equal(bad.status, 400);
+  const made = await api.post('/admin/temples').set(bearer(superadmin)).send({
+    name: 'Second Temple', code: 'second', timezone: 'America/New_York',
+    admin: { email: 'boss@second.test', password: 'long-enough' },
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+  assert.equal(made.body.admin.role, 'admin');
+  assert.equal((await api.post('/admin/temples').set(bearer(superadmin)).send({ name: 'Dup', code: 'second' })).status, 400);
+
+  // A refused admin must not leave a half-made temple behind.
+  const refused = await api.post('/admin/temples').set(bearer(superadmin)).send({
+    name: 'Ghost', code: 'ghost', admin: { email: 'boss@second.test', password: 'long-enough' },
+  });
+  assert.equal(refused.status, 400);
+  assert.equal(await Temple.countDocuments({ code: 'ghost' }), 0);
+
+  const list = await api.get('/admin/temples').set(bearer(superadmin));
+  assert.deepEqual(list.body.temples.map((t) => t.code).sort(), ['second', 'test']);
+
+  const login = await api.post('/admin/auth/login').send({ email: 'boss@second.test', password: 'long-enough' });
+  assert.equal(login.status, 200);
+  assert.equal(login.body.temple.code, 'second');
+  const offerings = await api.get('/admin/offerings').set(bearer(login.body.token));
+  assert.equal(offerings.body.offerings.length, 19);
+});
+
+test('a temple admin sees only their own temple: offerings, receipts, counters, users, logs', async () => {
+  const boss = (await api.post('/admin/auth/login').send({ email: 'boss@second.test', password: 'long-enough' })).body.token;
+  // Temple one has receipts and counters; temple two has none of them.
+  assert.equal((await api.get('/admin/receipts').set(bearer(boss))).body.total, 0);
+  assert.equal((await api.get('/admin/devices').set(bearer(boss))).body.devices.length, 0);
+  assert.deepEqual((await api.get('/admin/users').set(bearer(boss))).body.users.map((u) => u.email), ['boss@second.test']);
+  assert.equal((await api.get('/admin/receipts').set(bearer(admin))).body.total > 0, true);
+
+  // Offering prices are per temple: pricing Archana in temple two leaves temple one alone.
+  const mine = (await api.get('/admin/offerings').set(bearer(boss))).body.offerings.find((o) => o.labelEng === 'Archana');
+  await api.patch(`/admin/offerings/${mine.id}`).set(bearer(boss)).send({ price: 99, active: true });
+  const theirs = (await api.get('/admin/offerings').set(bearer(superadmin)).set('X-Temple-Id', String(temple._id))).body.offerings.find((o) => o.labelEng === 'Archana');
+  assert.equal(theirs.price, 25);
+
+  // Another temple's records answer as if they do not exist.
+  assert.equal((await api.patch(`/admin/offerings/${theirs.id}`).set(bearer(boss)).send({ price: 1 })).status, 404);
+  assert.equal((await api.post(`/admin/receipts/${pushed[0].id}/void`).set(bearer(boss)).send({ reason: 'x' })).status, 404);
+  const [theirUser] = await User.find({ email: 'admin@t.test' });
+  assert.equal((await api.patch(`/admin/users/${theirUser.id}`).set(bearer(boss)).send({ active: false })).status, 404);
+  const theirDevice = deviceRow.id;
+  assert.equal((await api.post(`/admin/devices/${theirDevice}/revoke`).set(bearer(boss)).send({})).status, 404);
+
+  const logs = (await api.get('/admin/logs').set(bearer(boss))).body.logs;
+  const secondId = String((await Temple.findOne({ code: 'second' }))._id);
+  assert.ok(logs.length > 0 && logs.every((l) => String(l.templeId) === secondId));
+});
+
+test('a counter enrolled in one temple only ever sees and writes that temple', async () => {
+  const boss = (await api.post('/admin/auth/login').send({ email: 'boss@second.test', password: 'long-enough' })).body.token;
+  const made = await api.post('/admin/devices').set(bearer(boss)).send({ counterName: 'Gate' });
+  const enrolled = await api.post('/device/v1/enroll').send({ code: made.body.enrollCode });
+  const auth = { Authorization: `Device ${enrolled.body.token}` };
+
+  const master = await api.get('/device/v1/master').set(auth);
+  assert.deepEqual(master.body.offerings.map((o) => o.labelEng), ['Archana']);
+  assert.equal(master.body.offerings[0].price, 99);
+
+  // 23:30 on 2 Sept in New York is already 3 Sept in UTC and India: the day is the temple's own.
+  const entry = receipt({ timestamp: '2026-09-03T03:30:00.000Z' });
+  await api.post('/device/v1/receipts').set(auth).send({ entries: [entry] });
+  const day = await api.get('/admin/receipts?day=2026-09-02').set(bearer(boss));
+  assert.deepEqual(day.body.receipts.map((r) => r.id), [entry.id]);
+  assert.equal((await api.get('/admin/receipts?day=2026-09-03').set(bearer(admin))).body.receipts.some((r) => r.id === entry.id), false);
+});
+
+test('a super admin steps into a temple with X-Temple-Id; without one, temple routes need a choice', async () => {
+  assert.equal((await api.get('/admin/offerings').set(bearer(superadmin))).status, 400);
+  const into = await api.get('/admin/offerings').set(bearer(superadmin)).set('X-Temple-Id', String(temple._id));
+  assert.equal(into.status, 200);
+  assert.equal((await api.get('/admin/offerings').set(bearer(superadmin)).set('X-Temple-Id', 'nope')).status, 400);
+  // A temple admin cannot hop into another temple by sending the header.
+  const boss = (await api.post('/admin/auth/login').send({ email: 'boss@second.test', password: 'long-enough' })).body.token;
+  const hop = await api.get('/admin/receipts').set(bearer(boss)).set('X-Temple-Id', String(temple._id));
+  assert.equal(hop.body.total, 1);
+  // The super admin cannot be given to a temple by the users route.
+  assert.equal((await api.post('/admin/users').set(bearer(boss)).send({ email: 's2@x.test', password: 'long-enough', role: 'superadmin' })).status, 400);
+});
+
+test('deactivating a temple locks out its staff and counters until it is switched back on', async () => {
+  const second = await Temple.findOne({ code: 'second' });
+  const boss = (await api.post('/admin/auth/login').send({ email: 'boss@second.test', password: 'long-enough' })).body.token;
+  const made = await api.post('/admin/devices').set(bearer(boss)).send({ counterName: 'Side' });
+  const token = (await api.post('/device/v1/enroll').send({ code: made.body.enrollCode })).body.token;
+
+  const off = await api.patch(`/admin/temples/${second.id}`).set(bearer(superadmin)).send({ active: false });
+  assert.equal(off.body.temple.active, false);
+  assert.equal((await api.get('/admin/offerings').set(bearer(boss))).status, 403);
+  assert.equal((await api.post('/admin/auth/login').send({ email: 'boss@second.test', password: 'long-enough' })).status, 403);
+  assert.equal((await api.post('/device/v1/heartbeat').set({ Authorization: `Device ${token}` }).send({})).status, 403);
+
+  await api.patch(`/admin/temples/${second.id}`).set(bearer(superadmin)).send({ active: true });
+  assert.equal((await api.get('/admin/offerings').set(bearer(boss))).status, 200);
+  assert.equal((await api.post('/device/v1/heartbeat').set({ Authorization: `Device ${token}` }).send({})).status, 200);
 });

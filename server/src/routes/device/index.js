@@ -7,7 +7,7 @@ import Offering from '../../models/Offering.js';
 import Receipt from '../../models/Receipt.js';
 import { HttpError, hashSecret, newSecret, requireDevice, wrap } from '../../middleware/auth.js';
 import { logActivity } from '../../services/activity.js';
-import { templeDay } from '../../services/day.js';
+import { templeDay, zoneOf } from '../../services/day.js';
 
 // Devices are unattended and retry blindly, so every route here is safe to
 // call twice.
@@ -35,7 +35,7 @@ router.post('/enroll', wrap(async (req, res) => {
 
   if (first) {
     await logActivity({
-      type: 'device.enrolled', actorType: 'device',
+      templeId: device.templeId, type: 'device.enrolled', actorType: 'device',
       deviceId: device.deviceId, counterName: device.counterName,
       objectType: 'device', objectId: device.deviceId,
       message: `${device.counterName} was enrolled`,
@@ -61,7 +61,7 @@ router.post('/login', wrap(async (req, res) => {
   });
   await device.save();
   await logActivity({
-    type: 'app.login', actorType: 'device',
+    templeId: device.templeId, type: 'app.login', actorType: 'device',
     deviceId: device.deviceId, counterName: device.counterName,
     occurredAt: parseDate(req.body?.occurredAt),
     message: `${operatorName} signed in at ${device.counterName}`,
@@ -75,7 +75,7 @@ router.post('/logout', wrap(async (req, res) => {
   const operatorName = str(req.body?.operatorName, 80) || 'Operator';
   const reason = req.body?.reason === 'expiry' ? 'expiry' : 'user';
   await logActivity({
-    type: 'app.logout', actorType: 'device',
+    templeId: device.templeId, type: 'app.logout', actorType: 'device',
     deviceId: device.deviceId, counterName: device.counterName,
     occurredAt: parseDate(req.body?.occurredAt),
     message: `${operatorName} signed out at ${device.counterName}`,
@@ -93,7 +93,7 @@ function parseDate(v) {
 }
 
 /** Turns one pushed entry into a receipt document, or says why it cannot be. */
-function toReceipt(entry, device, receivedAt) {
+function toReceipt(entry, device, receivedAt, zone) {
   if (!entry || typeof entry !== 'object') return { error: 'not an object' };
   if (typeof entry.id !== 'string' || !UUID.test(entry.id)) return { error: 'id must be a UUID' };
   const name = str(entry.name);
@@ -106,9 +106,9 @@ function toReceipt(entry, device, receivedAt) {
   if (!occurredAt) return { error: 'timestamp must be an ISO-8601 date' };
   return {
     doc: {
-      _id: entry.id.toLowerCase(), deviceId: device.deviceId, counterName: device.counterName,
+      _id: entry.id.toLowerCase(), templeId: device.templeId, deviceId: device.deviceId, counterName: device.counterName,
       name, nakshatram: str(entry.nakshatram) || '', offering, amount,
-      occurredAt, day: templeDay(occurredAt), receivedAt, printed: entry.printed === true,
+      occurredAt, day: templeDay(occurredAt, zone), receivedAt, printed: entry.printed === true,
     },
   };
 }
@@ -120,6 +120,7 @@ router.post('/receipts', wrap(async (req, res) => {
   if (entries.length > 500) throw new HttpError(413, 'Send at most 500 receipts per batch');
   const started = Date.now();
   const receivedAt = new Date();
+  const zone = await zoneOf(device.templeId);
   const results = [];
   let created = 0, duplicate = 0, rejected = 0;
 
@@ -127,7 +128,7 @@ router.post('/receipts', wrap(async (req, res) => {
   // batch, and each id gets its own answer.
   for (const entry of entries) {
     const id = typeof entry?.id === 'string' ? entry.id : null;
-    const { doc, error } = toReceipt(entry, device, receivedAt);
+    const { doc, error } = toReceipt(entry, device, receivedAt, zone);
     if (error) {
       rejected++;
       results.push({ id, status: 'rejected', error });
@@ -141,7 +142,7 @@ router.post('/receipts', wrap(async (req, res) => {
         created++;
         results.push({ id: doc._id, status: 'created' });
         await logActivity({
-          type: 'receipt.created', actorType: 'device',
+          templeId: device.templeId, type: 'receipt.created', actorType: 'device',
           deviceId: device.deviceId, counterName: device.counterName,
           objectType: 'receipt', objectId: doc._id, occurredAt: doc.occurredAt,
           message: `₹${doc.amount} ${doc.offering} for ${doc.name}`,
@@ -164,7 +165,7 @@ router.post('/receipts', wrap(async (req, res) => {
   }
   const accepted = created + duplicate;
   await logActivity({
-    type: rejected ? 'app.sync.failed' : 'app.sync',
+    templeId: device.templeId, type: rejected ? 'app.sync.failed' : 'app.sync',
     severity: rejected ? 'warning' : 'info',
     actorType: 'device', deviceId: device.deviceId, counterName: device.counterName,
     message: `Synced ${accepted} of ${entries.length} receipts`,
@@ -178,6 +179,7 @@ router.get('/master', wrap(async (req, res) => {
   const since = parseDate(req.query.since);
   const [offerings, nakshatrams, names] = await Promise.all([
     Offering.find({
+      templeId: req.device.templeId,
       active: true,
       $and: [
         { $or: [{ price: { $ne: null } }, { priceIsFixed: false }] },

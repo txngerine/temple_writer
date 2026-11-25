@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react';
 import { Status, useLoad } from '../App.jsx';
-import { api, templeTime, templeToday } from '../api/client.js';
+import { api, templeTime, templeToday, templeZone } from '../api/client.js';
 
 const hourOf = (iso) =>
-  new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: true }).format(new Date(iso));
+  new Intl.DateTimeFormat('en-IN', { timeZone: templeZone(), hour: 'numeric', hour12: true }).format(new Date(iso));
 
 export default function DailyLog() {
   const [day, setDay] = useState(templeToday());

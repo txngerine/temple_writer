@@ -79,7 +79,8 @@ admin/
 cd admin/server
 npm install
 cp .env.example .env          # fill MONGO_URI and JWT_SECRET
-npm run seed                  # nakshatrams + offerings (prices left unset)
+npm run create-superadmin -- owner@example.org 'a long password'
+                              # then sign in and add temples from the panel
 npm run dev                   # http://localhost:4000
 
 # web
@@ -90,13 +91,40 @@ npm run dev                   # http://localhost:5173
 
 To look at the panel with nothing installed, `npm run dev:memory` in
 `admin/server` starts the API on a throwaway in-memory database with the real
-offerings and nakshatrams but no counters, receipts or prices; sign in as `admin@temple.test` / `temple-demo`. Nothing is saved.
+offerings and nakshatrams but no counters, receipts or prices. Sign in as `admin@temple.test` / `temple-demo` (the Demo Temple's admin) or `super@temple.test` / `temple-demo` (the super admin). Nothing is saved.
 
-The first office account is made from the command line, since there is nobody
-yet to create it in the panel:
+## Multiple temples
+
+One deployment serves any number of temples.
+
+- A **super admin** belongs to no temple. They create temples (each with its own
+  timezone and a first admin), switch a temple off, and can step into any temple
+  from the panel to help. Made from the command line, since nobody exists yet to
+  create it: `npm run create-superadmin -- owner@example.org 'a long password'`.
+- A **temple admin** (and `supervisor`, `operator`, `ml`) belongs to exactly one
+  temple and only ever sees that temple's offerings and prices, counters,
+  receipts, users and activity log. Staff cannot reach another temple, even by
+  sending a different `X-Temple-Id`; that header only matters to the super admin.
+- **Counters** are enrolled by a temple admin and are tied to that temple for
+  life: the master list they pull and the receipts they push are that temple's.
+- A temple's **day** rolls over at midnight in its own timezone.
+- The 27 nakshatrams are shared; offerings are per temple, so the same offering
+  can have a different price in each.
+- Switching a temple off locks out its staff and counters at once; nothing is
+  deleted.
+
+Moving an existing single-temple database over (once):
 
 ```bash
-npm run create-admin -- office@example.org 'a long password'
+npm run migrate:multi-temple -- "Temple name" temple-code
+```
+
+Temple admin accounts are normally created from the Temples page. To make or reset
+one from the command line:
+
+```bash
+npm run create-admin -- temple-code office@example.org 'a long password'
+npm run seed -- temple-code   # re-load default offerings into a temple
 ```
 
 `.env`:
@@ -352,7 +380,8 @@ only so the app can stop shipping them in Dart.
 | ---------- | ---------- | ----- |
 | `receipts` | `_id` = device UUID, `deviceId`, `name`, `nakshatram`, `offering`, `amount`, `occurredAt`, `receivedAt`, `printed`, `voided` | Upsert on `_id`. Financial record — never expires, never hard-deleted. |
 | `devices` | `deviceId`, `counterName`, `tokenHash`, `appVersion`, `modelVersion`, `lastSeenAt`, `pendingCount` | Heartbeat target. One row per tablet. |
-| `users` | `email`, `passwordHash`, `role`, `active` | Roles: `admin`, `supervisor`, `operator`, `ml`. |
+| `temples` | `name`, `code`, `timezone`, `active` | One per temple. |
+| `users` | `email`, `passwordHash`, `role`, `templeId`, `active` | Roles: `superadmin` (no temple), `admin`, `supervisor`, `operator`, `ml`. |
 | `nakshatrams` | `mal`, `eng`, `order` | 27 rows, seeded, effectively read-only. |
 | `names` | `text`, `section`, `active`, `receiptCount` | The devotee dictionary, if you take it off the text file. Enforce the chillu rule: `രാജൻ`, never `രാജന്`. |
 
@@ -406,8 +435,9 @@ silent, these are the choices made:
 - **Receipts carry their temple-local `day`**, taken from the device timestamp,
   which is what the daily report groups on. Voided receipts are left out of the
   totals and shown separately.
-- **Roles.** Any signed-in account can read. Changing offerings and voiding
-  receipts needs `admin` or `supervisor`; counters and users need `admin`.
+- **Roles.** Any signed-in account can read its own temple. Changing offerings and voiding
+  receipts needs `admin` or `supervisor`; counters and users need `admin`; temples need `superadmin`.
+  Devices, receipts, offerings and log entries all carry a `templeId`.
 - **Not built:** a panel page for the `names` dictionary and anything for
   `model.published`. The `names` collection and its chillu rule exist, and
   `GET /device/v1/master` returns it.

@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 // counter generated, which is what makes a retried push idempotent.
 const ReceiptSchema = new mongoose.Schema({
   _id:        { type: String },
+  templeId:   { type: mongoose.Types.ObjectId, ref: 'Temple', required: true },
   deviceId:   { type: String, required: true },
   counterName: { type: String },
   name:       { type: String, required: true },
@@ -20,8 +21,8 @@ const ReceiptSchema = new mongoose.Schema({
   voidReason: { type: String },
 }, { timestamps: false });
 
-ReceiptSchema.index({ day: 1, occurredAt: -1 });
-ReceiptSchema.index({ deviceId: 1, occurredAt: -1 });
-ReceiptSchema.index({ name: 1 });
+ReceiptSchema.index({ templeId: 1, day: 1, occurredAt: -1 });
+ReceiptSchema.index({ templeId: 1, deviceId: 1, occurredAt: -1 });
+ReceiptSchema.index({ templeId: 1, name: 1 });
 
 export default mongoose.model('Receipt', ReceiptSchema);

@@ -1,7 +1,8 @@
 import mongoose from 'mongoose';
 
 const OfferingSchema = new mongoose.Schema({
-  labelMal: { type: String, required: true, unique: true, trim: true },
+  templeId: { type: mongoose.Types.ObjectId, ref: 'Temple', required: true },
+  labelMal: { type: String, required: true, trim: true },
   labelEng: { type: String, required: true, trim: true },
   icon:     { type: String },
   price:    { type: Number, min: 0, default: null },   // ₹, null = not set
@@ -14,7 +15,8 @@ const OfferingSchema = new mongoose.Schema({
   updatedBy:    { type: mongoose.Types.ObjectId, ref: 'User' },
 }, { timestamps: true });
 
-OfferingSchema.index({ active: 1, sortOrder: 1 });
+OfferingSchema.index({ templeId: 1, labelMal: 1 }, { unique: true });
+OfferingSchema.index({ templeId: 1, active: 1, sortOrder: 1 });
 
 // A counter that pulls the list must never receive an offering it cannot
 // charge for. A devotee-chosen offering (തുലാഭാരം, അന്നദാനം) has no price by
