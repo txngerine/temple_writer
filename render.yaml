@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: temple-writer-api
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: MONGO_URI
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DEVICE_TOKEN_PEPPER
+        generateValue: true
+      - key: TEMPLE_TZ
+        value: Asia/Kolkata
+      - key: WEB_ORIGIN
+        sync: false # URL of temple-writer-web, e.g. https://temple-writer-web.onrender.com
+
+  - type: web
+    name: temple-writer-web
+    runtime: static
+    rootDir: web
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false # URL of temple-writer-api, e.g. https://temple-writer-api.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
