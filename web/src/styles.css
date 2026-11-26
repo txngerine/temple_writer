@@ -223,7 +223,7 @@ tr.voided td:nth-child(-n+5) { text-decoration: line-through; }
 .menu-btn svg { width: 22px; height: 22px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; }
 
 @media (max-width: 860px) {
-  .shell { grid-template-columns: 1fr; }
+  .shell { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .topbar {
     display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 30;
     padding: 8px 12px; background: var(--brand); color: var(--brand-ink);
@@ -232,9 +232,9 @@ tr.voided td:nth-child(-n+5) { text-decoration: line-through; }
   .topbar strong { font-size: 15.5px; }
   .sidebar {
     position: fixed; z-index: 50; top: 0; left: 0; bottom: 0; height: 100dvh; width: min(290px, 86vw);
-    overflow-y: auto; transform: translateX(-102%); transition: transform .22s ease; box-shadow: var(--shadow-lg);
+    overflow-y: auto; transform: translateX(-102%); transition: transform .22s ease, box-shadow .22s;
   }
-  .menu-open .sidebar { transform: none; }
+  .menu-open .sidebar { transform: none; box-shadow: var(--shadow-lg); }
   .scrim { position: fixed; inset: 0; z-index: 40; background: rgba(15, 30, 24, .5); opacity: 0; pointer-events: none; transition: opacity .2s; }
   .menu-open .scrim { display: block; opacity: 1; pointer-events: auto; }
   .sidebar nav a { padding: 12px; }
