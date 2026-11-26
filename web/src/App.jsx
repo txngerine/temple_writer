@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { NavLink, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { api, getTempleId, getToken, setTempleId, setTempleZone, setToken, setUnauthorizedHandler } from './api/client.js';
 import DailyLog from './pages/DailyLog.jsx';
 import Devices from './pages/Devices.jsx';
@@ -47,6 +47,17 @@ export default function App() {
   const [temple, setTemple] = useState(null);
   const [loading, setLoading] = useState(Boolean(getToken()));
   const [offline, setOffline] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const location = useLocation();
+
+  // Close the mobile menu after navigating, and on Escape.
+  useEffect(() => { setMenuOpen(false); }, [location.pathname]);
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onKey = (e) => e.key === 'Escape' && setMenuOpen(false);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [menuOpen]);
 
   const isSuper = user?.role === 'superadmin';
 
@@ -109,7 +120,15 @@ export default function App() {
   const templeNav = temple ? NAV.filter((n) => !n.roles || n.roles.includes(actor.role)) : [];
   const nav = [...(isSuper ? PLATFORM_NAV : []), ...templeNav];
   return (
-    <div className="shell">
+    <div className={`shell${menuOpen ? ' menu-open' : ''}`}>
+      <header className="topbar">
+        <button className="menu-btn" aria-label={menuOpen ? 'Close menu' : 'Open menu'} aria-expanded={menuOpen} onClick={() => setMenuOpen((o) => !o)}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">{menuOpen ? <path d="M6 6l12 12M18 6L6 18" /> : <path d="M4 7h16M4 12h16M4 17h16" />}</svg>
+        </button>
+        <span className="brand-mark">🛕</span>
+        <strong>Temple Counter</strong>
+      </header>
+      <div className="scrim" onClick={() => setMenuOpen(false)} />
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">🛕</span>
